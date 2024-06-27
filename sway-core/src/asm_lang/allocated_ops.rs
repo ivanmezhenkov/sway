@@ -18,6 +18,7 @@ use crate::{
     fuel_prelude::fuel_asm::{self, op},
 };
 use either::Either;
+use fuel_vm::fuel_asm::{op::ADDI, Imm12};
 use std::fmt::{self, Write};
 use sway_types::span::Span;
 
@@ -43,7 +44,7 @@ impl fmt::Display for AllocatedRegister {
 }
 
 impl AllocatedRegister {
-    fn to_reg_id(&self) -> fuel_asm::RegId {
+    pub(crate) fn to_reg_id(&self) -> fuel_asm::RegId {
         match self {
             AllocatedRegister::Allocated(a) => fuel_asm::RegId::new(a + 16),
             AllocatedRegister::Constant(constant) => constant.to_reg_id(),
@@ -122,7 +123,7 @@ pub(crate) enum AllocatedOpcode {
         AllocatedRegister,
     ),
 
-    /* Conrol Flow Instructions */
+    /* Control Flow Instructions */
     JMP(AllocatedRegister),
     JI(VirtualImmediate24),
     JNE(AllocatedRegister, AllocatedRegister, AllocatedRegister),
@@ -152,6 +153,10 @@ pub(crate) enum AllocatedOpcode {
         AllocatedRegister,
         AllocatedRegister,
     ),
+    PSHH(VirtualImmediate24),
+    PSHL(VirtualImmediate24),
+    POPH(VirtualImmediate24),
+    POPL(VirtualImmediate24),
     SB(AllocatedRegister, AllocatedRegister, VirtualImmediate12),
     SW(AllocatedRegister, AllocatedRegister, VirtualImmediate12),
 
@@ -236,8 +241,8 @@ pub(crate) enum AllocatedOpcode {
     /* Non-VM Instructions */
     BLOB(VirtualImmediate24),
     DataSectionOffsetPlaceholder,
-    DataSectionRegisterLoadPlaceholder,
     LoadDataId(AllocatedRegister, DataId),
+    AddrDataId(AllocatedRegister, DataId),
     Undefined,
 }
 
@@ -309,6 +314,9 @@ impl AllocatedOpcode {
             MCP(_r1, _r2, _r3) => vec![],
             MCPI(_r1, _r2, _imm) => vec![],
             MEQ(r1, _r2, _r3, _r4) => vec![r1],
+            PSHH(_mask) | PSHL(_mask) | POPH(_mask) | POPL(_mask) => {
+                panic!("Cannot determine defined registers for register PUSH/POP instructions")
+            }
             SB(_r1, _r2, _i) => vec![],
             SW(_r1, _r2, _i) => vec![],
 
@@ -353,10 +361,8 @@ impl AllocatedOpcode {
             /* Non-VM Instructions */
             BLOB(_imm) => vec![],
             DataSectionOffsetPlaceholder => vec![],
-            DataSectionRegisterLoadPlaceholder => vec![&AllocatedRegister::Constant(
-                ConstantRegister::DataSectionStart,
-            )],
             LoadDataId(r1, _i) => vec![r1],
+            AddrDataId(r1, _i) => vec![r1],
             Undefined => vec![],
         })
         .into_iter()
@@ -431,6 +437,10 @@ impl fmt::Display for AllocatedOpcode {
             MCP(a, b, c) => write!(fmtr, "mcp  {a} {b} {c}"),
             MCPI(a, b, c) => write!(fmtr, "mcpi {a} {b} {c}"),
             MEQ(a, b, c, d) => write!(fmtr, "meq  {a} {b} {c} {d}"),
+            PSHH(mask) => write!(fmtr, "pshh {mask}"),
+            PSHL(mask) => write!(fmtr, "pshl {mask}"),
+            POPH(mask) => write!(fmtr, "poph {mask}"),
+            POPL(mask) => write!(fmtr, "popl {mask}"),
             SB(a, b, c) => write!(fmtr, "sb   {a} {b} {c}"),
             SW(a, b, c) => write!(fmtr, "sw   {a} {b} {c}"),
 
@@ -480,8 +490,8 @@ impl fmt::Display for AllocatedOpcode {
                     "DATA_SECTION_OFFSET[0..32]\nDATA_SECTION_OFFSET[32..64]"
                 )
             }
-            DataSectionRegisterLoadPlaceholder => write!(fmtr, "lw   $ds $is 1"),
             LoadDataId(a, b) => write!(fmtr, "load {a} {b}"),
+            AddrDataId(a, b) => write!(fmtr, "addr {a} {b}"),
             Undefined => write!(fmtr, "undefined op"),
         }
     }
@@ -517,6 +527,7 @@ impl AllocatedOp {
     pub(crate) fn to_fuel_asm(
         &self,
         offset_to_data_section: u64,
+        offset_from_instr_start: u64,
         data_section: &mut DataSection,
     ) -> Either<Vec<fuel_asm::Instruction>, DoubleWideData> {
         use AllocatedOpcode::*;
@@ -583,7 +594,9 @@ impl AllocatedOp {
 
             /* Memory Instructions */
             ALOC(a) => op::ALOC::new(a.to_reg_id()).into(),
+            CFEI(a) if a.value == 0 => return Either::Left(vec![]),
             CFEI(a) => op::CFEI::new(a.value.into()).into(),
+            CFSI(a) if a.value == 0 => return Either::Left(vec![]),
             CFSI(a) => op::CFSI::new(a.value.into()).into(),
             CFE(a) => op::CFE::new(a.to_reg_id()).into(),
             CFS(a) => op::CFS::new(a.to_reg_id()).into(),
@@ -596,6 +609,10 @@ impl AllocatedOp {
             MEQ(a, b, c, d) => {
                 op::MEQ::new(a.to_reg_id(), b.to_reg_id(), c.to_reg_id(), d.to_reg_id()).into()
             }
+            PSHH(mask) => op::PSHH::new(mask.value.into()).into(),
+            PSHL(mask) => op::PSHL::new(mask.value.into()).into(),
+            POPH(mask) => op::POPH::new(mask.value.into()).into(),
+            POPL(mask) => op::POPL::new(mask.value.into()).into(),
             SB(a, b, c) => op::SB::new(a.to_reg_id(), b.to_reg_id(), c.value.into()).into(),
             SW(a, b, c) => op::SW::new(a.to_reg_id(), b.to_reg_id(), c.value.into()).into(),
 
@@ -664,18 +681,33 @@ impl AllocatedOp {
             DataSectionOffsetPlaceholder => {
                 return Either::Right(offset_to_data_section.to_be_bytes())
             }
-            DataSectionRegisterLoadPlaceholder => op::LW::new(
-                fuel_asm::RegId::new(DATA_SECTION_REGISTER),
-                ConstantRegister::InstructionStart.to_reg_id(),
-                1.into(),
-            )
-            .into(),
             LoadDataId(a, b) => {
-                return Either::Left(realize_load(a, b, data_section, offset_to_data_section))
+                return Either::Left(realize_load(
+                    a,
+                    b,
+                    data_section,
+                    offset_to_data_section,
+                    offset_from_instr_start,
+                ))
             }
+            AddrDataId(a, b) => return Either::Left(addr_of(a, b, data_section)),
             Undefined => unreachable!("Sway cannot generate undefined ASM opcodes"),
         }])
     }
+}
+
+/// Address of a data section item
+fn addr_of(
+    dest: &AllocatedRegister,
+    data_id: &DataId,
+    data_section: &mut DataSection,
+) -> Vec<fuel_asm::Instruction> {
+    let offset_bytes = data_section.data_id_to_offset(data_id) as u64;
+    vec![fuel_asm::Instruction::ADDI(ADDI::new(
+        dest.to_reg_id(),
+        fuel_asm::RegId::new(DATA_SECTION_REGISTER),
+        Imm12::new(offset_bytes as u16),
+    ))]
 }
 
 /// Converts a virtual load word instruction which uses data labels into one which uses
@@ -687,6 +719,7 @@ fn realize_load(
     data_id: &DataId,
     data_section: &mut DataSection,
     offset_to_data_section: u64,
+    offset_from_instr_start: u64,
 ) -> Vec<fuel_asm::Instruction> {
     // if this data is larger than a word, instead of loading the data directly
     // into the register, we want to load a pointer to the data into the register
@@ -712,18 +745,23 @@ fn realize_load(
         Span::new(" ".into(), 0, 0, None).unwrap(),
     );
     let offset = match imm {
-            Ok(value) => value,
-            Err(_) => panic!("Unable to offset into the data section more than 2^12 bits. Unsupported data section length.")
+        Ok(value) => value,
+        Err(_) => panic!(
+            "Unable to offset into the data section more than 2^12 bits. \
+                                Unsupported data section length: {} words.",
+            offset_words
+        ),
     };
 
     if !has_copy_type {
-        // load the pointer itself into the register
-        // `offset_to_data_section` is in bytes. We want a byte
-        // address here
-        let pointer_offset_from_instruction_start = offset_to_data_section + offset_bytes;
+        // load the pointer itself into the register. `offset_to_data_section` is in bytes.
+        // The -4 is because $pc is added in the *next* instruction.
+        let pointer_offset_from_current_instr =
+            offset_to_data_section - offset_from_instr_start + offset_bytes - 4;
+
         // insert the pointer as bytes as a new data section entry at the end of the data
-        let data_id_for_pointer =
-            data_section.append_pointer(pointer_offset_from_instruction_start);
+        let data_id_for_pointer = data_section.append_pointer(pointer_offset_from_current_instr);
+
         // now load the pointer we just created into the `dest`ination
         let mut buf = Vec::with_capacity(2);
         buf.append(&mut realize_load(
@@ -731,13 +769,14 @@ fn realize_load(
             &data_id_for_pointer,
             data_section,
             offset_to_data_section,
+            offset_from_instr_start,
         ));
-        // add $is to the pointer since it is relative to the data section
+        // add $pc to the pointer since it is relative to the current instruction.
         buf.push(
             fuel_asm::op::ADD::new(
                 dest.to_reg_id(),
                 dest.to_reg_id(),
-                ConstantRegister::InstructionStart.to_reg_id(),
+                ConstantRegister::ProgramCounter.to_reg_id(),
             )
             .into(),
         );

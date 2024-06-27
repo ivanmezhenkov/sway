@@ -1,7 +1,6 @@
 use sway_error::{
     error::{CompileError, StructFieldUsageContext},
     handler::{ErrorEmitted, Handler},
-    warning::{CompileWarning, Warning},
 };
 use sway_types::{Ident, Span, Spanned};
 
@@ -35,7 +34,9 @@ pub(crate) fn instantiate_struct_field_access(
     // loop cannot be endless.
     while !current_type.is_struct() {
         match &*current_type {
-            TypeInfo::Ref(referenced_type) => {
+            TypeInfo::Ref {
+                referenced_type, ..
+            } => {
                 let referenced_type_id = referenced_type.type_id;
 
                 current_prefix_te = Box::new(ty::TyExpression {
@@ -64,30 +65,18 @@ pub(crate) fn instantiate_struct_field_access(
 
     let decl = engines.de().get_struct(struct_decl_ref);
     let (struct_can_be_changed, is_public_struct_access) =
-        StructAccessInfo::get_info(&decl, namespace).into();
+        StructAccessInfo::get_info(engines, &decl, namespace).into();
 
     let field = match decl.find_field(&field_to_access) {
         Some(field) => {
             if is_public_struct_access && field.is_private() {
-                // TODO: Uncomment this code and delete the one with warnings once struct field privacy becomes a hard error.
-                //       https://github.com/FuelLabs/sway/issues/5520
-                // return Err(handler.emit_err(CompileError::StructFieldIsPrivate {
-                //     field_name: (&field_to_access).into(),
-                //     struct_name: decl.call_path.suffix.clone(),
-                //     field_decl_span: field.name.span(),
-                //     struct_can_be_changed,
-                //     usage_context: StructFieldUsageContext::StructFieldAccess,
-                // }));
-                handler.emit_warn(CompileWarning {
-                    span: field_to_access.span(),
-                    warning_content: Warning::StructFieldIsPrivate {
-                        field_name: (&field_to_access).into(),
-                        struct_name: decl.call_path.suffix.clone(),
-                        field_decl_span: field.name.span(),
-                        struct_can_be_changed,
-                        usage_context: StructFieldUsageContext::StructFieldAccess,
-                    },
-                });
+                return Err(handler.emit_err(CompileError::StructFieldIsPrivate {
+                    field_name: (&field_to_access).into(),
+                    struct_name: decl.call_path.suffix.clone(),
+                    field_decl_span: field.name.span(),
+                    struct_can_be_changed,
+                    usage_context: StructFieldUsageContext::StructFieldAccess,
+                }));
             }
 
             field.clone()

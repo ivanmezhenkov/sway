@@ -11,24 +11,24 @@ use libp2p_identity::{secp256k1, Keypair, PeerId};
 use serde_json::json;
 use std::ops::Deref;
 
-const ABOUT: &str = "Creates a new key for use with fuel-core";
-
 forc_util::cli_examples! {
-    [ Creates a new key default for block production => crypto "new-key" ]
-    [ Creates a new key for peering => crypto "new-key -k peering" ]
-    [ Creates a new key for block production => crypto "new-key -k block-production" ]
+    crate::Command {
+        [ Creates a new key default for block production => "forc crypto new-key" ]
+        [ Creates a new key for peering => "forc crypto new-key -k peering" ]
+        [ Creates a new key for block production => "forc crypto new-key -k block-production" ]
+    }
 }
 
-/// Generate a random new secret & public key in the format expected by fuel-core
+/// Creates a new key for use with fuel-core
 #[derive(Debug, clap::Args)]
-#[clap(version, about = ABOUT, after_help = help())]
+#[clap(version, after_help = help())]
 pub struct Arg {
     /// Key type to generate. It can either be `block-production` or `peering`.
     #[clap(
         long = "key-type",
         short = 'k',
         value_enum,
-        default_value = KeyType::BlockProduction.into(),
+        default_value = <&'static str>::from(KeyType::BlockProduction),
     )]
     key_type: KeyType,
 }

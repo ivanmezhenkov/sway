@@ -296,6 +296,7 @@ fn storage_without_alignment() {
         storage {
          var1: Type1=Type1{ foo: 8 },
               var2: Type2=Type2{ bar: 9 },
+              ns1 { var3: u64 = 1, ns2 { var4: u64 = 1 } },
         }
         "#,
         r#"contract;
@@ -311,6 +312,12 @@ struct Type2 {
 storage {
     var1: Type1 = Type1 { foo: 8 },
     var2: Type2 = Type2 { bar: 9 },
+    ns1 {
+        var3: u64 = 1,
+        ns2 {
+            var4: u64 = 1,
+        },
+    },
 }
 "#,
     );
@@ -333,6 +340,7 @@ struct Type2 {
 storage {
  long_var_name: Type1=Type1{ foo: 8 },
       var2: Type2=Type2{ bar: 9 },
+      ns1 { var3: u64 = 1,  ns2 { var4: u64 = 1, },  }, var5: u64 = 1
 }
 "#,
         r#"contract;
@@ -348,6 +356,13 @@ struct Type2 {
 storage {
     long_var_name : Type1 = Type1 { foo: 8 },
     var2          : Type2 = Type2 { bar: 9 },
+    ns1 {
+        var3      : u64 = 1,
+        ns2 {
+            var4  : u64 = 1,
+        },
+    },
+    var5          : u64 = 1
 }
 "#,
         &mut formatter,
@@ -2405,7 +2420,7 @@ fn long_doc_break_new_line() {
 ///                             ▴ptr                    ▴VM_MAX_RAM
 /// ```
 /// For more information, see the Fuel Spec for [VM Initialization](https://fuellabs.github.io/fuel-specs/master/vm#vm-initialization)
-/// and the VM Instruction Set for [Memory Allocation](https://fuellabs.github.io/fuel-specs/master/vm/instruction_set.html#aloc-allocate-memory).
+/// and the VM Instruction Set for [Memory Allocation](https://docs.fuel.network/docs/specs/fuel-vm/instruction-set#aloc-allocate-memory).
 ///
 /// # Arguments
 /// 
@@ -2499,7 +2514,7 @@ pub fn alloc_bytes(count: u64) -> raw_ptr {
 ///                             ▴ptr                    ▴VM_MAX_RAM
 /// ```
 /// For more information, see the Fuel Spec for [VM Initialization](https://fuellabs.github.io/fuel-specs/master/vm#vm-initialization)
-/// and the VM Instruction Set for [Memory Allocation](https://fuellabs.github.io/fuel-specs/master/vm/instruction_set.html#aloc-allocate-memory).
+/// and the VM Instruction Set for [Memory Allocation](https://docs.fuel.network/docs/specs/fuel-vm/instruction-set#aloc-allocate-memory).
 ///
 /// # Arguments
 ///
@@ -2899,6 +2914,40 @@ fn single_argument_method() {
 
 pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
     let a = u64::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+}
+"#,
+    );
+}
+
+#[test]
+fn impl_func_where() {
+    check(
+        r#"library;
+
+        impl<K, V> Foo<Bar<K, V>>
+        where
+            K: Hash,
+        {
+            pub fn baz(self, _: K, _: V)
+            where
+                K: Hash,
+        {
+                debug();
+            }
+        }
+    "#,
+        r#"library;
+
+impl<K, V> Foo<Bar<K, V>>
+where
+    K: Hash,
+{
+    pub fn baz(self, _: K, _: V)
+    where
+        K: Hash,
+    {
+        debug();
+    }
 }
 "#,
     );

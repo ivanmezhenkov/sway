@@ -24,10 +24,10 @@ use crate::{
     BlockArgument, BranchToWithArgs,
 };
 
-/// A wrapper around an [ECS](https://github.com/fitzgen/generational-arena) handle into the
+/// A wrapper around an [ECS](https://github.com/orlp/slotmap) handle into the
 /// [`Context`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Function(pub generational_arena::Index);
+pub struct Function(pub slotmap::DefaultKey);
 
 #[doc(hidden)]
 pub struct FunctionContent {
@@ -38,6 +38,10 @@ pub struct FunctionContent {
     pub module: Module,
     pub is_public: bool,
     pub is_entry: bool,
+    // True if the function was an entry, before getting wrapped
+    // by the `__entry` function. E.g, a script `main` function.
+    pub is_original_entry: bool,
+    pub is_fallback: bool,
     pub selector: Option<[u8; 4]>,
     pub metadata: Option<MetadataIndex>,
 
@@ -64,6 +68,8 @@ impl Function {
         selector: Option<[u8; 4]>,
         is_public: bool,
         is_entry: bool,
+        is_original_entry: bool,
+        is_fallback: bool,
         metadata: Option<MetadataIndex>,
     ) -> Function {
         let content = FunctionContent {
@@ -76,6 +82,8 @@ impl Function {
             module,
             is_public,
             is_entry,
+            is_original_entry,
+            is_fallback,
             selector,
             metadata,
             local_storage: BTreeMap::new(),
@@ -112,7 +120,12 @@ impl Function {
                 )
             })
             .collect();
-        context.functions.get_mut(func.0).unwrap().arguments = arguments.clone();
+        context
+            .functions
+            .get_mut(func.0)
+            .unwrap()
+            .arguments
+            .clone_from(&arguments);
         let (_, arg_vals): (Vec<_>, Vec<_>) = arguments.iter().cloned().unzip();
         context.blocks.get_mut(entry_block.0).unwrap().args = arg_vals;
 
@@ -275,6 +288,17 @@ impl Function {
     /// methods.
     pub fn is_entry(&self, context: &Context) -> bool {
         context.functions[self.0].is_entry
+    }
+
+    /// Whether or not the function was a program entry point, i.e. `main`, `#[test]` fns or abi
+    /// methods, before it got wrapped within the `__entry` function.
+    pub fn is_original_entry(&self, context: &Context) -> bool {
+        context.functions[self.0].is_original_entry
+    }
+
+    /// Whether or not this function is a contract fallback function
+    pub fn is_fallback(&self, context: &Context) -> bool {
+        context.functions[self.0].is_fallback
     }
 
     // Get the function return type.
@@ -541,7 +565,7 @@ impl Function {
 
 /// An iterator over each [`Function`] in a [`Module`].
 pub struct FunctionIterator {
-    functions: Vec<generational_arena::Index>,
+    functions: Vec<slotmap::DefaultKey>,
     next: usize,
 }
 

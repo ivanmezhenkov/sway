@@ -5,9 +5,10 @@ use ::alloc::{alloc, realloc};
 use ::assert::assert;
 use ::option::Option::{self, *};
 use ::convert::From;
+use ::iterator::*;
 
 struct RawVec<T> {
-    pub ptr: raw_ptr,
+    ptr: raw_ptr,
     cap: u64,
 }
 
@@ -128,9 +129,18 @@ impl<T> RawVec<T> {
     }
 }
 
+impl<T> From<raw_slice> for RawVec<T> {
+    fn from(slice: raw_slice) -> Self {
+        Self {
+            ptr: slice.ptr(),
+            cap: slice.len::<T>(),
+        }
+    }
+}
+
 /// A contiguous growable array type, written as `Vec<T>`, short for 'vector'.
 pub struct Vec<T> {
-    pub buf: RawVec<T>,
+    buf: RawVec<T>,
     len: u64,
 }
 
@@ -256,7 +266,7 @@ impl<T> Vec<T> {
     /// }
     /// ```
     pub fn capacity(self) -> u64 {
-        self.buf.cap
+        self.buf.capacity()
     }
 
     /// Clears the vector, removing all values.
@@ -409,7 +419,7 @@ impl<T> Vec<T> {
         // Shift everything down to fill in that spot.
         let mut i = index;
         if self.len > 1 {
-            while i < self.len {
+            while i < self.len - 1 {
                 let ptr = buf_start.add::<T>(i);
                 ptr.add::<T>(1).copy_to::<T>(ptr, 1);
                 i += 1;
@@ -455,7 +465,7 @@ impl<T> Vec<T> {
         assert(index <= self.len);
 
         // If there is insufficient capacity, grow the buffer.
-        if self.len == self.buf.cap {
+        if self.len == self.buf.capacity() {
             self.buf.grow();
         }
 
@@ -587,6 +597,31 @@ impl<T> Vec<T> {
 
         index_ptr.write::<T>(value);
     }
+
+    pub fn iter(self) -> VecIter<T> {
+        VecIter {
+            values: self,
+            index: 0,
+        }
+    }
+
+    /// Gets the pointer of the allocation.
+    ///
+    /// # Returns
+    ///
+    /// [raw_ptr] - The location in memory that the allocated vec lives.
+    ///
+    /// # Examples
+    ///
+    /// ```sway
+    /// fn foo() {
+    ///     let vec = Vec::new();
+    ///     assert(!vec.ptr().is_null());
+    /// }
+    /// ```
+    pub fn ptr(self) -> raw_ptr {
+        self.buf.ptr()
+    }
 }
 
 impl<T> AsRawSlice for Vec<T> {
@@ -597,20 +632,16 @@ impl<T> AsRawSlice for Vec<T> {
 
 impl<T> From<raw_slice> for Vec<T> {
     fn from(slice: raw_slice) -> Self {
-        let buf = RawVec {
-            ptr: slice.ptr(),
-            cap: slice.len::<T>(),
-        };
         Self {
-            buf,
-            len: buf.cap,
+            buf: RawVec::from(slice),
+            len: slice.len::<T>(),
         }
     }
 }
 
 impl<T> From<Vec<T>> for raw_slice {
     fn from(vec: Vec<T>) -> Self {
-        asm(ptr: (vec.buf.ptr(), vec.len)) {
+        asm(ptr: (vec.ptr(), vec.len())) {
             ptr: raw_slice
         }
     }
@@ -620,25 +651,54 @@ impl<T> AbiEncode for Vec<T>
 where
     T: AbiEncode,
 {
-    fn abi_encode(self, ref mut buffer: Buffer) {
+    fn abi_encode(self, buffer: Buffer) -> Buffer {
         let len = self.len();
-        buffer.push(len);
+        let mut buffer = len.abi_encode(buffer);
 
         let mut i = 0;
         while i < len {
             let item = self.get(i).unwrap();
-            item.abi_encode(buffer);
+            buffer = item.abi_encode(buffer);
             i += 1;
         }
+
+        buffer
     }
 }
 
-#[test()]
-fn test_vec_with_len_1() {
-    let mut ve: Vec<u64> = Vec::new();
-    assert(ve.len == 0);
-    ve.push(1);
-    assert(ve.len == 1);
-    let _ = ve.remove(0);
-    assert(ve.len == 0);
+impl<T> AbiDecode for Vec<T>
+where
+    T: AbiDecode,
+{
+    fn abi_decode(ref mut buffer: BufferReader) -> Vec<T> {
+        let len = u64::abi_decode(buffer);
+
+        let mut v = Vec::with_capacity(len);
+
+        let mut i = 0;
+        while i < len {
+            let item = T::abi_decode(buffer);
+            v.push(item);
+            i += 1;
+        }
+
+        v
+    }
+}
+
+pub struct VecIter<T> {
+    values: Vec<T>,
+    index: u64,
+}
+
+impl<T> Iterator for VecIter<T> {
+    type Item = T;
+    fn next(ref mut self) -> Option<Self::Item> {
+        if self.index >= self.values.len() {
+            return None
+        }
+
+        self.index += 1;
+        self.values.get(self.index - 1)
+    }
 }

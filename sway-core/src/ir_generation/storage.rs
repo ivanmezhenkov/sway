@@ -8,7 +8,7 @@ use sway_ir::{
     context::Context,
     irtype::Type,
 };
-use sway_types::state::StateIndex;
+use sway_types::u256::U256;
 
 /// Determines how values that are less then a word in length
 /// has to be padded to word boundary when in structs or enums.
@@ -19,20 +19,62 @@ enum InByte8Padding {
     Left,
 }
 
-/// Hands out storage keys using a state index and a list of subfield indices.
-/// Basically returns sha256("storage_<state_index>_<idx1>_<idx2>_..")
-pub(super) fn get_storage_key<T>(ix: &StateIndex, indices: &[T]) -> Bytes32
-where
-    T: std::fmt::Display,
-{
-    Hasher::hash(indices.iter().fold(
+/// Hands out storage keys using storage field names or an existing key.
+/// Basically returns sha256("storage::<storage_namespace_name1>::<storage_namespace_name2>.<storage_field_name>")
+/// or key if defined.
+pub(super) fn get_storage_key(storage_field_names: Vec<String>, key: Option<U256>) -> Bytes32 {
+    if let Some(key) = key {
+        return key.to_be_bytes().into();
+    }
+
+    Hasher::hash(get_storage_key_string(storage_field_names))
+}
+
+pub fn get_storage_key_string(storage_field_names: Vec<String>) -> String {
+    if storage_field_names.len() == 1 {
         format!(
-            "{}{}",
-            sway_utils::constants::STORAGE_DOMAIN_SEPARATOR,
-            ix.to_usize()
-        ),
-        |acc, i| format!("{acc}_{i}"),
-    ))
+            "{}{}{}",
+            sway_utils::constants::STORAGE_DOMAIN,
+            sway_utils::constants::STORAGE_FIELD_SEPARATOR,
+            storage_field_names.last().unwrap(),
+        )
+    } else {
+        format!(
+            "{}{}{}{}{}",
+            sway_utils::constants::STORAGE_DOMAIN,
+            sway_utils::constants::STORAGE_NAMESPACE_SEPARATOR,
+            storage_field_names
+                .iter()
+                .take(storage_field_names.len() - 1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(sway_utils::constants::STORAGE_NAMESPACE_SEPARATOR),
+            sway_utils::constants::STORAGE_FIELD_SEPARATOR,
+            storage_field_names.last().unwrap(),
+        )
+    }
+}
+
+/// Hands out unique storage field ids using storage field names and struct field names.
+/// Basically returns sha256("storage::<storage_namespace_name1>::<storage_namespace_name2>.<storage_field_name>.<struct_field_name1>.<struct_field_name2>")
+pub(super) fn get_storage_field_id(
+    storage_field_names: Vec<String>,
+    struct_field_names: Vec<String>,
+) -> Bytes32 {
+    let data = format!(
+        "{}{}",
+        get_storage_key_string(storage_field_names),
+        if struct_field_names.is_empty() {
+            "".to_string()
+        } else {
+            format!(
+                "{}{}",
+                sway_utils::constants::STRUCT_FIELD_SEPARATOR,
+                struct_field_names.join(sway_utils::constants::STRUCT_FIELD_SEPARATOR),
+            )
+        }
+    );
+    Hasher::hash(data)
 }
 
 use uint::construct_uint;
@@ -63,21 +105,21 @@ pub(super) fn add_to_b256(x: Bytes32, y: u64) -> Bytes32 {
 pub fn serialize_to_storage_slots(
     constant: &Constant,
     context: &Context,
-    ix: &StateIndex,
+    storage_field_names: Vec<String>,
+    key: Option<U256>,
     ty: &Type,
-    indices: &[usize],
 ) -> Vec<StorageSlot> {
     match &constant.value {
         ConstantValue::Undef => vec![],
         // If not being a part of an aggregate, single byte values like `bool`, `u8`, and unit
         // are stored as a byte at the beginning of the storage slot.
         ConstantValue::Unit if ty.is_unit(context) => vec![StorageSlot::new(
-            get_storage_key(ix, indices),
+            get_storage_key(storage_field_names, key),
             Bytes32::new([0; 32]),
         )],
         ConstantValue::Bool(b) if ty.is_bool(context) => {
             vec![StorageSlot::new(
-                get_storage_key(ix, indices),
+                get_storage_key(storage_field_names, key),
                 Bytes32::new([
                     if *b { 1 } else { 0 },
                     0,
@@ -116,7 +158,7 @@ pub fn serialize_to_storage_slots(
         }
         ConstantValue::Uint(b) if ty.is_uint8(context) => {
             vec![StorageSlot::new(
-                get_storage_key(ix, indices),
+                get_storage_key(storage_field_names, key),
                 Bytes32::new([
                     *b as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0,
@@ -126,7 +168,7 @@ pub fn serialize_to_storage_slots(
         // Similarly, other uint values are stored at the beginning of the storage slot.
         ConstantValue::Uint(n) if ty.is_uint(context) => {
             vec![StorageSlot::new(
-                get_storage_key(ix, indices),
+                get_storage_key(storage_field_names, key),
                 Bytes32::new(
                     n.to_be_bytes()
                         .iter()
@@ -140,13 +182,13 @@ pub fn serialize_to_storage_slots(
         }
         ConstantValue::U256(b) if ty.is_uint_of(context, 256) => {
             vec![StorageSlot::new(
-                get_storage_key(ix, indices),
+                get_storage_key(storage_field_names, key),
                 Bytes32::new(b.to_be_bytes()),
             )]
         }
         ConstantValue::B256(b) if ty.is_b256(context) => {
             vec![StorageSlot::new(
-                get_storage_key(ix, indices),
+                get_storage_key(storage_field_names, key),
                 Bytes32::new(b.to_be_bytes()),
             )]
         }
@@ -183,7 +225,7 @@ pub fn serialize_to_storage_slots(
                 ty.as_string(context)
             );
             (0..(type_size_in_bytes + 31) / 32)
-                .map(|i| add_to_b256(get_storage_key(ix, indices), i))
+                .map(|i| add_to_b256(get_storage_key(storage_field_names.clone(), key.clone()), i))
                 .zip((0..packed.len() / 4).map(|i| {
                     Bytes32::new(
                         Vec::from_iter((0..4).flat_map(|j| *packed[4 * i + j]))

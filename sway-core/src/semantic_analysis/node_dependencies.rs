@@ -244,7 +244,7 @@ fn depends_on(
         (AstNodeContent::UseStatement(_), AstNodeContent::UseStatement(_)) => false,
         (_, AstNodeContent::UseStatement(_)) => true,
 
-        // Then declarations, ordered using the dependecies list.
+        // Then declarations, ordered using the dependencies list.
         (AstNodeContent::IncludeStatement(_), AstNodeContent::Declaration(_)) => false,
         (AstNodeContent::UseStatement(_), AstNodeContent::Declaration(_)) => false,
         (AstNodeContent::Declaration(dependant), AstNodeContent::Declaration(dependee)) => {
@@ -307,6 +307,10 @@ impl Dependencies {
                 let decl = engines.pe().get_constant(decl_id);
                 self.gather_from_constant_decl(engines, &decl)
             }
+            Declaration::ConfigurableDeclaration(decl_id) => {
+                let decl = engines.pe().get_configurable(decl_id);
+                self.gather_from_configurable_decl(engines, &decl)
+            }
             Declaration::TraitTypeDeclaration(decl_id) => {
                 let decl = engines.pe().get_trait_type(decl_id);
                 self.gather_from_type_decl(engines, &decl)
@@ -337,6 +341,7 @@ impl Dependencies {
                 })
                 .gather_from_type_parameters(type_parameters)
             }
+            Declaration::EnumVariantDeclaration(_decl) => unreachable!(),
             Declaration::TraitDeclaration(decl_id) => {
                 let trait_decl = engines.pe().get_trait(decl_id);
                 self.gather_from_iter(trait_decl.supertraits.iter(), |deps, sup| {
@@ -345,11 +350,13 @@ impl Dependencies {
                 .gather_from_iter(
                     trait_decl.interface_surface.iter(),
                     |deps, item| match item {
-                        TraitItem::TraitFn(sig) => deps
-                            .gather_from_iter(sig.parameters.iter(), |deps, param| {
+                        TraitItem::TraitFn(decl_id) => {
+                            let sig = engines.pe().get_trait_fn(decl_id);
+                            deps.gather_from_iter(sig.parameters.iter(), |deps, param| {
                                 deps.gather_from_type_argument(engines, &param.type_argument)
                             })
-                            .gather_from_type_argument(engines, &sig.return_type),
+                            .gather_from_type_argument(engines, &sig.return_type)
+                        }
                         TraitItem::Constant(decl_id) => {
                             let const_decl = engines.pe().get_constant(decl_id);
                             deps.gather_from_constant_decl(engines, &const_decl)
@@ -429,11 +436,13 @@ impl Dependencies {
                     deps.gather_from_call_path(&sup.name, false, false)
                 })
                 .gather_from_iter(interface_surface.iter(), |deps, item| match item {
-                    TraitItem::TraitFn(sig) => deps
-                        .gather_from_iter(sig.parameters.iter(), |deps, param| {
+                    TraitItem::TraitFn(decl_id) => {
+                        let sig = engines.pe().get_trait_fn(decl_id);
+                        deps.gather_from_iter(sig.parameters.iter(), |deps, param| {
                             deps.gather_from_type_argument(engines, &param.type_argument)
                         })
-                        .gather_from_type_argument(engines, &sig.return_type),
+                        .gather_from_type_argument(engines, &sig.return_type)
+                    }
                     TraitItem::Constant(decl_id) => {
                         let const_decl = engines.pe().get_constant(decl_id);
                         deps.gather_from_constant_decl(engines, &const_decl)
@@ -450,20 +459,26 @@ impl Dependencies {
                 })
             }
             Declaration::StorageDeclaration(decl_id) => {
-                let StorageDeclaration { fields, .. } = &*engines.pe().get_storage(decl_id);
-                self.gather_from_iter(
-                    fields.iter(),
-                    |deps,
-                     StorageField {
-                         ref type_argument, ..
-                     }| {
-                        deps.gather_from_type_argument(engines, type_argument)
-                    },
-                )
+                let StorageDeclaration { entries, .. } = &*engines.pe().get_storage(decl_id);
+                self.gather_from_iter(entries.iter(), |deps, entry| {
+                    deps.gather_from_storage_entry(engines, entry)
+                })
             }
             Declaration::TypeAliasDeclaration(decl_id) => {
                 let TypeAliasDeclaration { ty, .. } = &*engines.pe().get_type_alias(decl_id);
                 self.gather_from_type_argument(engines, ty)
+            }
+        }
+    }
+
+    fn gather_from_storage_entry(self, engines: &Engines, entry: &StorageEntry) -> Self {
+        match entry {
+            StorageEntry::Namespace(namespace) => self
+                .gather_from_iter(namespace.entries.iter(), |deps, entry| {
+                    deps.gather_from_storage_entry(engines, entry)
+                }),
+            StorageEntry::Field(field) => {
+                self.gather_from_type_argument(engines, &field.type_argument)
             }
         }
     }
@@ -474,6 +489,24 @@ impl Dependencies {
         const_decl: &ConstantDeclaration,
     ) -> Self {
         let ConstantDeclaration {
+            type_ascription,
+            value,
+            ..
+        } = const_decl;
+        match value {
+            Some(value) => self
+                .gather_from_type_argument(engines, type_ascription)
+                .gather_from_expr(engines, value),
+            None => self,
+        }
+    }
+
+    fn gather_from_configurable_decl(
+        self,
+        engines: &Engines,
+        const_decl: &ConfigurableDeclaration,
+    ) -> Self {
+        let ConfigurableDeclaration {
             type_ascription,
             value,
             ..
@@ -656,15 +689,17 @@ impl Dependencies {
             }) => self
                 .gather_from_expr(engines, condition)
                 .gather_from_block(engines, body),
+            ExpressionKind::ForLoop(ForLoopExpression { desugared, .. }) => {
+                self.gather_from_expr(engines, desugared)
+            }
             ExpressionKind::Reassignment(reassignment) => {
                 self.gather_from_expr(engines, &reassignment.rhs)
             }
             ExpressionKind::ImplicitReturn(expr) | ExpressionKind::Return(expr) => {
                 self.gather_from_expr(engines, expr)
             }
-            ExpressionKind::Ref(expr) | ExpressionKind::Deref(expr) => {
-                self.gather_from_expr(engines, expr)
-            }
+            ExpressionKind::Ref(RefExpression { value: expr, .. })
+            | ExpressionKind::Deref(expr) => self.gather_from_expr(engines, expr),
         }
     }
 
@@ -873,6 +908,10 @@ fn decl_name(engines: &Engines, decl: &Declaration) -> Option<DependentSymbol> {
             let decl = engines.pe().get_constant(decl_id);
             dep_sym(decl.name.clone())
         }
+        Declaration::ConfigurableDeclaration(decl_id) => {
+            let decl = engines.pe().get_configurable(decl_id);
+            dep_sym(decl.name.clone())
+        }
         Declaration::TraitTypeDeclaration(decl_id) => {
             let decl = engines.pe().get_trait_type(decl_id);
             dep_sym(decl.name.clone())
@@ -885,6 +924,7 @@ fn decl_name(engines: &Engines, decl: &Declaration) -> Option<DependentSymbol> {
             let decl = engines.pe().get_enum(decl_id);
             dep_sym(decl.name.clone())
         }
+        Declaration::EnumVariantDeclaration(_decl) => None,
         Declaration::TraitDeclaration(decl_id) => {
             let decl = engines.pe().get_trait(decl_id);
             dep_sym(decl.name.clone())
@@ -966,6 +1006,7 @@ fn decl_name(engines: &Engines, decl: &Declaration) -> Option<DependentSymbol> {
 /// because it is used for keys and values in the tree.
 fn type_info_name(type_info: &TypeInfo) -> String {
     match type_info {
+        TypeInfo::Never => "never",
         TypeInfo::StringArray(_) | TypeInfo::StringSlice => "str",
         TypeInfo::UnsignedInteger(n) => match n {
             IntegerBits::Eight => "uint8",
@@ -1002,7 +1043,7 @@ fn type_info_name(type_info: &TypeInfo) -> String {
         TypeInfo::Slice(..) => "__slice",
         TypeInfo::Alias { .. } => "alias",
         TypeInfo::TraitType { .. } => "trait type",
-        TypeInfo::Ref(..) => "reference type",
+        TypeInfo::Ref { .. } => "reference type",
     }
     .to_string()
 }
@@ -1021,7 +1062,3 @@ fn recursively_depends_on(
                 .unwrap_or(false)
         })
 }
-
-// -------------------------------------------------------------------------------------------------
-//
-//

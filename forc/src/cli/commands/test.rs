@@ -2,16 +2,19 @@ use crate::cli;
 use ansi_term::Colour;
 use clap::Parser;
 use forc_pkg as pkg;
-use forc_test::{TestFilter, TestRunnerCount, TestedPackage};
+use forc_test::{decode_log_data, TestFilter, TestRunnerCount, TestedPackage};
 use forc_util::{tx_utils::format_log_receipts, ForcError, ForcResult};
-use pkg::manifest::ExperimentalFlags;
+use pkg::manifest::build_profile::ExperimentalFlags;
+use sway_core::fuel_prelude::fuel_tx::Receipt;
 use tracing::info;
 
 forc_util::cli_examples! {
-    [ Run test => forc "test" => ".*could not find `Forc.toml`.*" ]
-    [ Run test with a filter => forc "test $filter" => ".*could not find `Forc.toml`.*" ]
-    [ Run test without any output => forc "test --silent" => "^$" ]
-    [ Run test without creating or update the lock file  => forc "test --locked" => ".*could not find `Forc.toml`.*" ]
+    crate::cli::Opt {
+        [ Run test => "forc test" ]
+        [ Run test with a filter => "forc test $filter" ]
+        [ Run test without any output => "forc test --silent" ]
+        [ Run test without creating or update the lock file  => "forc test --locked" ]
+    }
 }
 
 /// Run the Sway unit tests for the current project.
@@ -32,6 +35,7 @@ forc_util::cli_examples! {
 /// considered a failure in the case that a revert (`rvrt`) instruction is encountered during
 /// execution. Otherwise, it is considered a success.
 #[derive(Debug, Parser)]
+#[clap(bin_name = "forc test", version, after_help = help())]
 pub struct Command {
     #[clap(flatten)]
     pub build: cli::shared::Build,
@@ -47,9 +51,9 @@ pub struct Command {
     /// threads available in your system.
     pub test_threads: Option<usize>,
 
+    /// Disable the "new encoding" feature
     #[clap(long)]
-    /// Experimental flag for the "new encoding" feature
-    pub experimental_new_encoding: bool,
+    pub no_encoding_v1: bool,
 }
 
 /// The set of options provided for controlling output of a test.
@@ -57,11 +61,15 @@ pub struct Command {
 #[clap(after_help = help())]
 pub struct TestPrintOpts {
     #[clap(long = "pretty-print", short = 'r')]
-    /// Pretty-print the logs emiited from tests.
+    /// Pretty-print the logs emitted from tests.
     pub pretty_print: bool,
     /// Print `Log` and `LogData` receipts for tests.
     #[clap(long = "logs", short = 'l')]
     pub print_logs: bool,
+    /// Decode logs and show decoded log information in human readable format alongside the raw
+    /// logs.
+    #[clap(long = "decode", short = 'd')]
+    pub decode_logs: bool,
 }
 
 pub(crate) fn exec(cmd: Command) -> ForcResult<()> {
@@ -139,6 +147,22 @@ fn print_tested_pkg(pkg: &TestedPackage, test_print_opts: &TestPrintOpts) -> For
         // If logs are enabled, print them.
         if test_print_opts.print_logs {
             let logs = &test.logs;
+            if test_print_opts.decode_logs {
+                for log in logs {
+                    if let Receipt::LogData {
+                        rb,
+                        data: Some(data),
+                        ..
+                    } = log
+                    {
+                        let decoded_log_data =
+                            decode_log_data(&rb.to_string(), data, &pkg.built.program_abi)?;
+                        let var_value = decoded_log_data.value;
+                        info!("Decoded log value: {}, log rb: {}", var_value, rb);
+                    }
+                }
+                info!("Raw logs:");
+            }
             let formatted_logs = format_log_receipts(logs, test_print_opts.pretty_print)?;
             info!("{}", formatted_logs);
         }
@@ -196,8 +220,8 @@ fn print_tested_pkg(pkg: &TestedPackage, test_print_opts: &TestPrintOpts) -> For
     Ok(())
 }
 
-fn opts_from_cmd(cmd: Command) -> forc_test::Opts {
-    forc_test::Opts {
+fn opts_from_cmd(cmd: Command) -> forc_test::TestOpts {
+    forc_test::TestOpts {
         pkg: pkg::PkgOpts {
             path: cmd.build.pkg.path,
             offline: cmd.build.pkg.offline,
@@ -209,11 +233,11 @@ fn opts_from_cmd(cmd: Command) -> forc_test::Opts {
         },
         print: pkg::PrintOpts {
             ast: cmd.build.print.ast,
-            dca_graph: cmd.build.print.dca_graph,
-            dca_graph_url_format: cmd.build.print.dca_graph_url_format,
-            finalized_asm: cmd.build.print.finalized_asm,
-            intermediate_asm: cmd.build.print.intermediate_asm,
-            ir: cmd.build.print.ir,
+            dca_graph: cmd.build.print.dca_graph.clone(),
+            dca_graph_url_format: cmd.build.print.dca_graph_url_format.clone(),
+            asm: cmd.build.print.asm(),
+            bytecode: cmd.build.print.bytecode,
+            ir: cmd.build.print.ir(),
             reverse_order: cmd.build.print.reverse_order,
         },
         time_phases: cmd.build.print.time_phases,
@@ -229,7 +253,7 @@ fn opts_from_cmd(cmd: Command) -> forc_test::Opts {
         debug_outfile: cmd.build.output.debug_file,
         build_target: cmd.build.build_target,
         experimental: ExperimentalFlags {
-            new_encoding: cmd.experimental_new_encoding,
+            new_encoding: !cmd.no_encoding_v1,
         },
     }
 }

@@ -17,13 +17,17 @@ pub fn possibly_nonzero_u64_expression(
         Literal(crate::language::Literal::Numeric(value)) => *value != 0,
         // not a u64 literal, hence we return true to be on the safe side
         Literal(_) => true,
-        ConstantExpression { const_decl, .. } => match &const_decl.value {
+        ConstantExpression { decl, .. } => match &decl.value {
+            Some(expr) => possibly_nonzero_u64_expression(namespace, engines, expr),
+            None => false,
+        },
+        ConfigurableExpression { decl, .. } => match &decl.value {
             Some(expr) => possibly_nonzero_u64_expression(namespace, engines, expr),
             None => false,
         },
         VariableExpression { name, .. } => {
             match namespace
-                .resolve_symbol(&Handler::default(), engines, name, None)
+                .resolve_symbol_typed(&Handler::default(), engines, name, None)
                 .ok()
             {
                 Some(ty_decl) => {
@@ -64,7 +68,8 @@ pub fn possibly_nonzero_u64_expression(
         | StructFieldAccess { .. }
         | TupleElemAccess { .. }
         | StorageAccess(_)
-        | WhileLoop { .. } => true,
+        | WhileLoop { .. }
+        | ForLoop { .. } => true,
         // The following expression variants are unreachable, because of the type system
         // but we still consider these as non-zero to be on the safe side
         LazyOperator { .. }

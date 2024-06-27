@@ -1,5 +1,3 @@
-use std::collections::hash_map::Entry;
-
 /// Constant value demotion.
 ///
 /// This pass demotes 'by-value' constant types to 'by-reference` pointer types, based on target
@@ -13,13 +11,14 @@ use crate::{
 };
 
 use rustc_hash::FxHashMap;
+use sway_types::FxIndexMap;
 
-pub const CONSTDEMOTION_NAME: &str = "constdemotion";
+pub const CONST_DEMOTION_NAME: &str = "const-demotion";
 
 pub fn create_const_demotion_pass() -> Pass {
     Pass {
-        name: CONSTDEMOTION_NAME,
-        descr: "By-value constant demotion to by-reference.",
+        name: CONST_DEMOTION_NAME,
+        descr: "Demotion of by-value constants to by-reference",
         deps: Vec::new(),
         runner: ScopedPass::FunctionPass(PassMutability::Transform(const_demotion)),
     }
@@ -31,7 +30,7 @@ pub fn const_demotion(
     function: Function,
 ) -> Result<bool, IrError> {
     // Find all candidate constant values and their wrapped constants.
-    let mut candidate_values: FxHashMap<Block, Vec<(Value, Constant)>> = FxHashMap::default();
+    let mut candidate_values: FxIndexMap<Block, Vec<(Value, Constant)>> = FxIndexMap::default();
 
     for (block, inst) in function.instruction_iter(context) {
         let operands = inst.get_instruction(context).unwrap().op.get_operands();
@@ -40,10 +39,10 @@ pub fn const_demotion(
                 if super::target_fuel::is_demotable_type(context, &c.ty) {
                     let dem = (*val, c.clone());
                     match candidate_values.entry(block) {
-                        Entry::Occupied(mut occ) => {
+                        indexmap::map::Entry::Occupied(mut occ) => {
                             occ.get_mut().push(dem);
                         }
-                        Entry::Vacant(vac) => {
+                        indexmap::map::Entry::Vacant(vac) => {
                             vac.insert(vec![dem]);
                         }
                     }
